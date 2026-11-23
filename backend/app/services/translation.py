@@ -2,6 +2,13 @@ from threading import Lock
 from time import perf_counter
 
 import torch
+
+TORCH_INTEROP_THREADS = 1
+TORCH_INTRAOP_THREADS = 6
+
+torch.set_num_interop_threads(TORCH_INTEROP_THREADS)
+torch.set_num_threads(TORCH_INTRAOP_THREADS)
+
 from IndicTransToolkit.processor import IndicProcessor
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from transformers.modeling_utils import PreTrainedModel

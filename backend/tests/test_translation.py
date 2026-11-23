@@ -2,7 +2,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
+import torch
+
 from app.services.translation import (
+    TORCH_INTEROP_THREADS,
+    TORCH_INTRAOP_THREADS,
     TranslationError,
     TranslationInputTooLongError,
     TranslationService,
@@ -12,6 +16,10 @@ from app.services.translation import (
 class TranslationServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = TranslationService()
+
+    def test_configures_torch_cpu_thread_counts(self) -> None:
+        self.assertEqual(torch.get_num_interop_threads(), TORCH_INTEROP_THREADS)
+        self.assertEqual(torch.get_num_threads(), TORCH_INTRAOP_THREADS)
 
     def test_rejects_empty_and_whitespace_input_without_loading_model(self) -> None:
         for text in ("", " \t\n "):
