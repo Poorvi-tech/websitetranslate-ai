@@ -72,7 +72,10 @@ The FastAPI backend is developed and run inside WSL. From the repository root:
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install \
+  --index-url https://download.pytorch.org/whl/cpu \
+  --extra-index-url https://pypi.org/simple \
+  -r requirements.txt
 cp .env.example .env
 ```
 
@@ -85,9 +88,9 @@ set +a
 uvicorn app.main:app --reload
 ```
 
-The initial API provides `GET /`, `GET /health`, and `GET /languages`; the languages response lists English (`en`) and Hindi (`hi`). Interactive API documentation is available at `/docs`. Run the endpoint tests with `python -m unittest discover -s tests`.
+The API provides `GET /`, `GET /health`, `GET /languages`, `POST /token-count` for exact model-token preflight, and `POST /translate` for English-to-Hindi translation. Interactive API documentation is available at `/docs`. Run the endpoint tests with `python -m unittest discover -s tests`.
 
-`CORS_ORIGINS` is a comma-separated allowlist of exact origins; it does not enable wildcard origins or credentials. During extension integration, configure the extension's exact `chrome-extension://<extension-id>` origin in this setting. The extension ID may differ between development installations, so use the ID shown in Chrome rather than a guessed value.
+`CORS_ORIGINS` is a comma-separated allowlist of exact origins; it does not enable wildcard origins or credentials. The local example allows the development extension ID `chrome-extension://lfbhofdbacdekhahmahgegnnlbadgnfi`. If Chrome assigns a different ID, update `CORS_ORIGINS` to the exact origin shown in `chrome://extensions`.
 
 ## Development roadmap
 
@@ -103,7 +106,7 @@ The initial API provides `GET /`, `GET /health`, and `GET /languages`; the langu
 
 ## Current status
 
-**Phase 4 — initial FastAPI backend**
+**Phase 6 — Translation API**
 
 - The repository structure is established.
 - README and Python/browser/VS Code/OS ignore rules are added.
@@ -111,5 +114,8 @@ The initial API provides `GET /`, `GET /health`, and `GET /languages`; the langu
 - Popup-to-background-to-content-script communication can extract readable text and restore preserved text.
 - Text extraction skips unsuitable and hidden elements and preserves node-to-original-text mappings.
 - A minimal FastAPI backend exposes root, health, and English/Hindi language-list endpoints.
-- Backend dependencies, virtual environment, endpoint tests, and exact-origin CORS configuration are set up for WSL development.
-- Translation-model integration and extension-to-backend API connection have not been implemented.
+- A reusable, lazy-loaded IndicTrans2 English-to-Hindi translation service runs on CPU; its setup and limitations are documented in [docs/translation-model.md](docs/translation-model.md).
+- `POST /token-count` provides exact model-token preflight and `POST /translate` uses the shared service with language-pair, text-length, and model-error validation.
+- The extension passes text through the background service worker, batches requests within API limits, and can restore the preserved original text.
+- Backend tests, exact-origin CORS configuration, and the model cache are set up for WSL development.
+- Cloud deployment has not been implemented.

@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+ENV/
+env/
+
+# Python packaging and tooling
+pip-log.txt
+pip-delete-this-directory.txt
+*.manifest
+*.spec
+.python-version
+
+# Browser extension build and package output
+*.crx
+*.pem
+dist/
+build/
+web-ext-artifacts/
+
+# VS Code
+.vscode/*
+!.vscode/extensions.json
+*.code-workspace
+.history/
+
+# Operating systems
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Logs and local environment files
+*.log
+.env
+.env.*
+!.env.example
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+

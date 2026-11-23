@@ -1,5 +1,20 @@
-from fastapi import APIRouter
+import logging
 
+from fastapi import APIRouter, HTTPException
+
+from app.api.schemas import (
+    TokenCountRequest,
+    TokenCountResponse,
+    TranslationRequest,
+    TranslationResponse,
+)
+from app.services.translation import (
+    TranslationError,
+    TranslationInputTooLongError,
+    translation_service,
+)
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -21,3 +36,86 @@ def languages() -> dict[str, list[dict[str, str]]]:
             {"code": "hi", "name": "Hindi"},
         ]
     }
+
+
+@router.post(
+    "/token-count",
+    response_model=TokenCountResponse,
+    summary="Count model tokens for text segments",
+    description=(
+        "Returns exact IndicTrans2 token counts for up to 8 segments with a "
+        "combined limit of 2,000 characters. Use this to prepare valid "
+        "translation requests."
+    ),
+    responses={
+        422: {"description": "Invalid or oversized text segments."},
+        503: {"description": "Translation model is unavailable."},
+    },
+)
+def token_count(request: TokenCountRequest) -> TokenCountResponse:
+    try:
+        counts = translation_service.count_tokens(request.texts)
+    except TranslationError as exc:
+        logger.exception("Translation tokenizer failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Translation service is unavailable. Please try again later.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unexpected error while counting translation tokens")
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while counting tokens.",
+        ) from exc
+
+    return TokenCountResponse(token_counts=counts)
+
+
+@router.post(
+    "/translate",
+    response_model=TranslationResponse,
+    summary="Translate English text to Hindi",
+    description=(
+        "Translates English text to Hindi. Text is limited to 2,000 characters "
+        "and 256 model tokens; over-limit inputs are rejected, not truncated."
+    ),
+    responses={
+        422: {
+            "description": (
+                "Invalid request, unsupported language pair, or input too long."
+            )
+        },
+        500: {"description": "Unexpected internal error."},
+        503: {"description": "Translation model is unavailable."},
+    },
+)
+def translate(request: TranslationRequest) -> TranslationResponse:
+    if (request.source_language, request.target_language) != ("en", "hi"):
+        raise HTTPException(
+            status_code=422,
+            detail="Unsupported language pair. Supported pair: en to hi.",
+        )
+
+    try:
+        translated_text = translation_service.translate(request.text)
+    except TranslationInputTooLongError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TranslationError as exc:
+        logger.exception("Translation service failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Translation service is unavailable. Please try again later.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unexpected error while translating text")
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while translating text.",
+        ) from exc
+
+    return TranslationResponse(
+        original_text=request.text,
+        translated_text=translated_text,
+        source_language=request.source_language,
+        target_language=request.target_language,
+    )

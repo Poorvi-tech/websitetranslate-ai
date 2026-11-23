@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebsiteTranslate AI</title>
+    <link rel="stylesheet" href="../styles/popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <header class="popup__header">
+        <div class="popup__icon" aria-hidden="true">W</div>
+        <h1>WebsiteTranslate AI</h1>
+      </header>
+
+      <section class="language-row" aria-label="Translation languages">
+        <div class="language">
+          <span class="language__label">Source</span>
+          <select id="source-language" aria-label="Source language" disabled>
+            <option value="en" selected>English</option>
+          </select>
+        </div>
+        <span class="language-row__arrow" aria-hidden="true">→</span>
+        <div class="language">
+          <span class="language__label">Target</span>
+          <select id="target-language" aria-label="Target language" disabled>
+            <option value="hi" selected>Hindi</option>
+          </select>
+        </div>
+      </section>
+
+      <div class="popup__actions">
+        <button id="translate-button" class="button button--primary" type="button">
+          Translate Webpage
+        </button>
+        <button id="restore-button" class="button button--secondary" type="button">
+          Restore Original
+        </button>
+      </div>
+
+      <p id="status-message" class="status" role="status" aria-live="polite">
+        Ready
+      </p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
