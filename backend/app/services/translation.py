@@ -7,7 +7,11 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils_base import BatchEncoding, PreTrainedTokenizerBase
 
-from app.core.limits import MAX_INPUT_TOKENS, MAX_TEXT_CHARACTERS
+from app.core.limits import (
+    MAX_INPUT_TOKENS,
+    MAX_TEXT_CHARACTERS,
+    MAX_TRANSLATION_BATCH_ITEMS,
+)
 
 MODEL_ID = "ai4bharat/indictrans2-en-indic-dist-200M"
 MODEL_REVISION = "2cfd0a20057756d756bf3e53528f492afc52f91a"
@@ -113,8 +117,22 @@ class TranslationService:
                 ) from exc
 
     def translate(self, text: str) -> str:
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Text must be a non-empty string.")
+        return self.translate_many([text])[0]
+
+    def translate_many(self, texts: list[str]) -> list[str]:
+        if (
+            not texts
+            or len(texts) > MAX_TRANSLATION_BATCH_ITEMS
+            or any(not isinstance(text, str) or not text.strip() for text in texts)
+        ):
+            raise ValueError(
+                "Texts must be a non-empty list of at most "
+                f"{MAX_TRANSLATION_BATCH_ITEMS} non-empty strings."
+            )
+        if sum(len(text) for text in texts) > MAX_TEXT_CHARACTERS:
+            raise ValueError(
+                f"Combined text exceeds {MAX_TEXT_CHARACTERS} characters."
+            )
 
         with self._lock:
             if not self.is_loaded:
@@ -127,10 +145,11 @@ class TranslationService:
             processor = self._processor
 
             try:
-                inputs = self._encode([text.strip()])
+                inputs = self._encode([text.strip() for text in texts])
                 if inputs["input_ids"].shape[-1] > MAX_INPUT_TOKENS:
                     raise TranslationInputTooLongError(
-                        f"Text exceeds the model limit of {MAX_INPUT_TOKENS} tokens."
+                        "At least one text exceeds the model limit of "
+                        f"{MAX_INPUT_TOKENS} tokens."
                     )
                 inputs = inputs.to("cpu")
 
@@ -158,9 +177,13 @@ class TranslationService:
             except Exception as exc:
                 raise TranslationError("IndicTrans2 translation failed.") from exc
 
-            if len(translations) != 1 or not translations[0].strip():
-                raise TranslationError("IndicTrans2 returned an empty translation.")
-            return translations[0].strip()
+            if len(translations) != len(texts) or any(
+                not translation.strip() for translation in translations
+            ):
+                raise TranslationError(
+                    "IndicTrans2 returned an invalid or empty batch translation."
+                )
+            return [translation.strip() for translation in translations]
 
 
 translation_service = TranslationService()

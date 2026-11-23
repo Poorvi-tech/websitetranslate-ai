@@ -1,72 +1,30 @@
 # WebsiteTranslate AI
 
-## Project overview
+A local prototype that translates suitable English webpage text into Hindi with
+the AI4Bharat IndicTrans2 English-to-Indic Distilled 200M model. The project
+contains a Manifest V3 Chrome extension and a FastAPI backend. Translation
+requests stay on the local machine during development.
 
-WebsiteTranslate AI is a prototype Chrome extension designed to translate English webpage content into Hindi. The project combines a browser extension interface with a Python backend and a pre-trained open-source machine translation model.
+## Implemented features
 
-The repository contains an early Chrome extension and a minimal backend API. Translation and end-to-end integration are still planned.
+- The popup starts translation and original-text restoration for the active tab.
+- The extension extracts visible, non-editable text nodes and leaves script,
+  style, form-control, and other unsuitable content alone.
+- The background worker checks exact model-token counts, splits oversized text,
+  sends bounded translation batches, and reports progress and failures.
+- Successfully translated nodes can be restored to their exact original text.
+- The backend exposes `/health`, `/languages`, `/token-count`, `/translate`, and
+  `/translate-batch`.
 
-## Objective
+Automated tests cover the backend contracts and a mocked extension flow. The
+unpacked extension's complete translate/restore flow, layout integrity, and
+browser refresh behavior have not been manually verified in Chrome during this
+test run; the automated harness is not a substitute for that check.
 
-Build a simple, end-to-end webpage translation experience where a user activates the extension and relevant text from the current webpage is translated from English to Hindi.
+## Backend setup (WSL Ubuntu)
 
-The prototype is intended to demonstrate:
-
-- Browser extension fundamentals.
-- Communication between a Chrome extension and a Python backend.
-- Use of a pre-trained open-source translation model.
-- A clear progression from a proof of concept to a usable application.
-
-## Initial features
-
-Planned features for the first working prototype:
-
-- A Chrome extension popup.
-- Manual activation of English-to-Hindi translation.
-- Page text extraction through extension scripts.
-- Translation requests sent to a Python backend.
-- Hindi text returned and presented on the webpage.
-- Basic loading and error states.
-
-## Planned technology stack
-
-- **Browser extension:** Manifest V3, JavaScript, HTML, and CSS.
-- **Backend:** Python and FastAPI.
-- **Translation model:** Pre-trained open-source English-to-Hindi translation model.
-- **API:** REST endpoints served by FastAPI.
-- **Development tools:** Git, GitHub, VS Code, and Python package tooling.
-
-The translation model will be selected during implementation.
-
-## High-level architecture
-
-```text
-User
-  |
-  v
-Chrome Extension Popup
-  |
-  v
-Content Script / Page Text Extraction
-  |
-  v
-Backend API
-  |
-  v
-Pre-trained Translation Model
-  |
-  v
-Hindi Translation Response
-  |
-  v
-Updated Browser Page
-```
-
-The extension handles user interaction and webpage integration. The backend exposes an API and manages translation-model requests. The model performs the English-to-Hindi translation.
-
-## Backend development
-
-The FastAPI backend is developed and run inside WSL. From the repository root:
+From the repository root, create the environment if needed and install the
+CPU-only dependencies:
 
 ```bash
 cd backend
@@ -76,46 +34,90 @@ python -m pip install \
   --index-url https://download.pytorch.org/whl/cpu \
   --extra-index-url https://pypi.org/simple \
   -r requirements.txt
-cp .env.example .env
+python -m pip check
 ```
 
-In `.env`, replace `YOUR_EXTENSION_ID` with the ID shown for the unpacked extension at `chrome://extensions`. Load the settings and start the API:
+The model is gated on Hugging Face. Authenticate there and accept its access
+conditions before the first download. Model files are stored in the Hugging
+Face user cache, not in this repository. Do not put access tokens in project
+files.
+
+Create the local CORS configuration only if it does not already exist:
+
+```bash
+if [ ! -f .env ]; then cp .env.example .env; fi
+```
+
+Set `CORS_ORIGINS` in `.env` to the exact
+`chrome-extension://<extension-id>` origin shown at `chrome://extensions`.
+Without an explicit `CORS_ORIGINS`, browser cross-origin access is disabled.
+Then start the API from the `backend` directory:
 
 ```bash
 set -a
 source .env
 set +a
-uvicorn app.main:app --reload
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-The API provides `GET /`, `GET /health`, `GET /languages`, `POST /token-count` for exact model-token preflight, and `POST /translate` for English-to-Hindi translation. Interactive API documentation is available at `/docs`. Run the endpoint tests with `python -m unittest discover -s tests`.
+For development auto-reload, add `--reload`. To prevent Hugging Face network
+access after the model is cached, prefix the command with
+`HF_HUB_OFFLINE=1`.
 
-`CORS_ORIGINS` is a comma-separated allowlist of exact origins; it does not enable wildcard origins or credentials. The local example allows the development extension ID `chrome-extension://lfbhofdbacdekhahmahgegnnlbadgnfi`. If Chrome assigns a different ID, update `CORS_ORIGINS` to the exact origin shown in `chrome://extensions`.
+Check `http://127.0.0.1:8000/health` and open
+`http://127.0.0.1:8000/docs` for the interactive API documentation.
 
-## Development roadmap
+## Load the Chrome extension
 
-1. Initialize the repository and project structure.
-2. Create the Chrome extension manifest and popup.
-3. Implement secure text extraction from webpages.
-4. Build a minimal Python backend API.
-5. Integrate and test a pre-trained translation model.
-6. Connect the extension to the backend.
-7. Add loading, error, and unsupported-page handling.
-8. Test translation quality and browser behavior.
-9. Document setup and usage instructions.
+1. Start the backend and confirm `/health` returns `{"status":"ok"}`.
+2. Open `chrome://extensions` and enable **Developer mode**.
+3. Choose **Load unpacked** and select this repository's `extension/` folder.
+4. Copy the extension ID into `backend/.env` as the exact
+   `chrome-extension://<extension-id>` value in `CORS_ORIGINS`, then restart
+   the backend if you changed it.
+5. Open an ordinary English webpage, open the extension popup, and choose
+   **Translate Webpage**. Use **Restore Original** to restore changed text.
 
-## Current status
+The extension's local API URL is centralized in
+`extension/config/api-config.js`. Its manifest grants access only to
+`http://127.0.0.1:8000/*`; no API credentials are stored in extension files.
 
-**Phase 6 — Translation API**
+## API limits and behavior
 
-- The repository structure is established.
-- README and Python/browser/VS Code/OS ignore rules are added.
-- A Manifest V3 extension shell with a popup, content script, and background service worker is available.
-- Popup-to-background-to-content-script communication can extract readable text and restore preserved text.
-- Text extraction skips unsuitable and hidden elements and preserves node-to-original-text mappings.
-- A minimal FastAPI backend exposes root, health, and English/Hindi language-list endpoints.
-- A reusable, lazy-loaded IndicTrans2 English-to-Hindi translation service runs on CPU; its setup and limitations are documented in [docs/translation-model.md](docs/translation-model.md).
-- `POST /token-count` provides exact model-token preflight and `POST /translate` uses the shared service with language-pair, text-length, and model-error validation.
-- The extension passes text through the background service worker, batches requests within API limits, and can restore the preserved original text.
-- Backend tests, exact-origin CORS configuration, and the model cache are set up for WSL development.
-- Cloud deployment has not been implemented.
+- Only English (`en`) to Hindi (`hi`) is supported.
+- `/token-count` accepts at most 64 items and 2,000 combined characters.
+- `/translate-batch` accepts at most 8 items and 2,000 combined characters;
+  each item must fit the model's 256-token input limit.
+- `/translate` remains available for a single text item with the same
+  character and token limits.
+- Inputs are rejected or split before translation; they are not silently
+  truncated.
+- The extension skips hidden and editable content. It changes text-node values,
+  not page markup, links, images, scripts, or styles.
+- A page refresh reloads the website's original content; translation records
+  are in memory and do not persist across reloads.
+- The CPU model can be slow on pages with thousands of text segments. Network
+  calls time out with an error; failed or invalid batches remain unchanged.
+- Browser-internal pages and other protected pages cannot be modified by
+  extensions.
+
+## Run automated tests
+
+From the repository root:
+
+```bash
+(cd backend && .venv/bin/python -m unittest discover -s tests -v)
+node --test extension/tests/flow.test.cjs
+```
+
+These tests do not install or control Chrome. Verify translation, restore,
+refresh, links/buttons, and backend/network failure behavior manually in the
+unpacked extension before treating the prototype as browser-verified.
+
+## Translation model
+
+See [docs/translation-model.md](docs/translation-model.md) for the model
+revision, license, inference workflow, dependencies, and CPU limitations.
+
+Cloud deployment and additional language pairs are outside the current
+prototype.

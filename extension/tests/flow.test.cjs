@@ -19,9 +19,15 @@ const backgroundSource = fs.readFileSync(
 ).replace(
   /^import \{[\s\S]*?\} from "\.\.\/config\/api-config\.js";/,
   'const API_BASE_URL = "http://127.0.0.1:8000";\n' +
+    "const API_REQUEST_TIMEOUT_MS = 120000;\n" +
+    "const HEALTH_REQUEST_TIMEOUT_MS = 10000;\n" +
     "const MAX_API_TEXT_CHARACTERS = 2000;\n" +
-    "const MAX_TOKEN_COUNT_BATCH_ITEMS = 8;"
+    "const MAX_INPUT_TOKENS = 256;\n" +
+    "const MAX_TOKEN_COUNT_BATCH_ITEMS = 64;\n" +
+    "const MAX_TRANSLATION_BATCH_ITEMS = 8;"
 );
+const hostSetTimeout = setTimeout;
+const hostClearTimeout = clearTimeout;
 
 function createElement(tagName, options = {}) {
   return {
@@ -98,10 +104,21 @@ function createContentContext(inputSegments) {
 function createFlowHarness({
   segments,
   maxInputTokens = 256,
-  failTranslations = new Set()
+  failTranslations = new Set(),
+  timeoutAtPath = null,
+  holdHealth = false,
+  backendUnavailable = false,
+  failBatchStatus = null,
+  invalidBatchJson = false
 }) {
   const content = createContentContext(segments);
   let backgroundListener;
+  let releaseHealth;
+  const healthGate = holdHealth
+    ? new Promise((resolve) => {
+      releaseHealth = resolve;
+    })
+    : null;
   const apiRequests = [];
   const chrome = {
     runtime: {
@@ -131,38 +148,79 @@ function createFlowHarness({
 
   async function fetchApi(url, options = {}) {
     if (url.endsWith("/health")) {
+      if (healthGate) {
+        await healthGate;
+      }
+      if (backendUnavailable) {
+        return new Response(JSON.stringify({ detail: "Backend unavailable" }), {
+          status: 503
+        });
+      }
       return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
     }
 
     const body = JSON.parse(options.body);
     apiRequests.push({ url, body });
+    if (timeoutAtPath && url.endsWith(timeoutAtPath)) {
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true }
+        );
+      });
+    }
+
     if (url.endsWith("/token-count")) {
       return new Response(JSON.stringify({
         token_counts: body.texts.map((text) => Array.from(text).length),
         max_input_tokens: maxInputTokens,
         max_text_characters: 2000,
-        max_token_count_batch_items: 8
+        max_token_count_batch_items: 64
       }), { status: 200 });
     }
 
-    if (failTranslations.has(body.text)) {
-      return new Response(JSON.stringify({ detail: "model unavailable" }), {
-        status: 503
-      });
+    if (url.endsWith("/translate-batch")) {
+      if (failBatchStatus) {
+        return new Response(JSON.stringify({ detail: "Model service unavailable" }), {
+          status: failBatchStatus
+        });
+      }
+      if (invalidBatchJson) {
+        return new Response("not JSON", { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        translated_texts: body.texts.map((text) => {
+          if (failTranslations.has(text)) {
+            return "";
+          }
+          return text === "Hello, how are you?"
+            ? "नमस्ते, आप कैसे हैं?"
+            : text.toUpperCase();
+        })
+      }), { status: 200 });
     }
 
-    const translatedText = body.text === "Hello, how are you?"
-      ? "नमस्ते, आप कैसे हैं?"
-      : body.text.toUpperCase();
-    return new Response(JSON.stringify({ translated_text: translatedText }), {
-      status: 200
-    });
+    return new Response(JSON.stringify({ detail: "Not found" }), { status: 404 });
   }
 
   const backgroundContext = vm.createContext({
     chrome,
-    console: { error() {} },
-    fetch: fetchApi
+    console: { error() {}, warn() {} },
+    fetch: fetchApi,
+    AbortController,
+    setTimeout(callback, delay) {
+      if (timeoutAtPath && delay === 120000) {
+        queueMicrotask(callback);
+        return 0;
+      }
+      return hostSetTimeout(callback, delay);
+    },
+    clearTimeout(timer) {
+      if (timer !== 0) {
+        hostClearTimeout(timer);
+      }
+    }
   });
   vm.runInContext(backgroundSource, backgroundContext);
 
@@ -181,7 +239,12 @@ function createFlowHarness({
     });
   }
 
-  return { apiRequests, content, sendAction };
+  return {
+    apiRequests,
+    content,
+    releaseHealth,
+    sendAction
+  };
 }
 
 test("translates, reuses original text on repeat, and restores exactly", async () => {
@@ -218,7 +281,7 @@ test("translates, reuses original text on repeat, and restores exactly", async (
   );
 });
 
-test("keeps failed segments unchanged and restores successful segments", async () => {
+test("keeps invalid batch items unchanged and restores successful segments", async () => {
   const harness = createFlowHarness({
     segments: [{ text: "Hello" }, { text: "Fail" }],
     failTranslations: new Set(["Fail"])
@@ -239,19 +302,21 @@ test("keeps failed segments unchanged and restores successful segments", async (
 
 test("token preflight splits chunks before any oversized translation request", async () => {
   const harness = createFlowHarness({
-    segments: [{ text: "abcdefghijklmnop" }],
-    maxInputTokens: 6
+    segments: [{ text: "a".repeat(600) }]
   });
 
   const result = await harness.sendAction("TRANSLATE_PAGE");
   assert.equal(result.status, "success");
-  assert.equal(harness.content.textNodes[0].nodeValue, "ABCDEFGHIJKLMNOP");
+  assert.equal(harness.content.textNodes[0].nodeValue, "A".repeat(600));
 
   const translateRequests = harness.apiRequests
-    .filter((request) => request.url.endsWith("/translate"));
-  assert.ok(translateRequests.length > 1);
+    .filter((request) => request.url.endsWith("/translate-batch"));
+  assert.equal(translateRequests.length, 1);
+  assert.ok(translateRequests[0].body.texts.length > 1);
   assert.ok(
-    translateRequests.every((request) => Array.from(request.body.text).length <= 6)
+    translateRequests.every((request) =>
+      request.body.texts.every((text) => Array.from(text).length <= 256)
+    )
   );
 });
 
@@ -263,6 +328,148 @@ test("does not restore text subsequently modified by the page", async () => {
   const result = await harness.sendAction("RESTORE_PAGE");
   assert.match(result.statusMessage, /page-modified segments were left untouched/);
   assert.equal(harness.content.textNodes[0].nodeValue, "Page updated this text");
+});
+
+test("batches thousands of short segments within API item limits", async () => {
+  const segments = Array.from({ length: 520 }, (_, index) => ({
+    text: `segment ${index}`
+  }));
+  const harness = createFlowHarness({ segments });
+
+  const result = await harness.sendAction("TRANSLATE_PAGE");
+  assert.equal(result.status, "success");
+  assert.equal(harness.content.textNodes.length, 520);
+
+  const tokenCountRequests = harness.apiRequests.filter((request) =>
+    request.url.endsWith("/token-count")
+  );
+  const translationRequests = harness.apiRequests.filter((request) =>
+    request.url.endsWith("/translate-batch")
+  );
+  assert.ok(tokenCountRequests.length < 20);
+  assert.equal(translationRequests.length, 65);
+  for (const request of tokenCountRequests) {
+    assert.ok(request.body.texts.length <= 64);
+    assert.ok(request.body.texts.reduce((sum, text) => sum + Array.from(text).length, 0) <= 2000);
+  }
+  for (const request of translationRequests) {
+    assert.ok(request.body.texts.length <= 8);
+    assert.ok(request.body.texts.reduce((sum, text) => sum + Array.from(text).length, 0) <= 2000);
+  }
+});
+
+test("does not apply empty translations returned by the backend", async () => {
+  const harness = createFlowHarness({
+    segments: [{ text: "Translate me" }],
+    failTranslations: new Set(["Translate me"])
+  });
+
+  const result = await harness.sendAction("TRANSLATE_PAGE");
+  assert.equal(result.status, "backend_unavailable");
+  assert.match(result.statusMessage, /empty translation/);
+  assert.equal(harness.content.textNodes[0].nodeValue, "Translate me");
+});
+
+test("reports an API timeout and leaves webpage text unchanged", async () => {
+  const harness = createFlowHarness({
+    segments: [{ text: "Hello" }],
+    timeoutAtPath: "/token-count"
+  });
+
+  const result = await harness.sendAction("TRANSLATE_PAGE");
+  assert.equal(result.status, "backend_unavailable");
+  assert.match(result.statusMessage, /timed out/);
+  assert.equal(harness.content.textNodes[0].nodeValue, "Hello");
+});
+
+test("reports an unavailable backend before extracting page content", async () => {
+  const harness = createFlowHarness({
+    segments: [{ text: "Hello" }],
+    backendUnavailable: true
+  });
+
+  const result = await harness.sendAction("TRANSLATE_PAGE");
+  assert.equal(result.status, "backend_unavailable");
+  assert.match(result.statusMessage, /Backend unavailable/);
+  assert.equal(harness.apiRequests.length, 0);
+  assert.equal(harness.content.textNodes[0].nodeValue, "Hello");
+});
+
+test("reports a model error and keeps the failed batch unchanged", async () => {
+  const harness = createFlowHarness({
+    segments: [{ text: "Hello" }, { text: "How are you?" }],
+    failBatchStatus: 503
+  });
+
+  const result = await harness.sendAction("TRANSLATE_PAGE");
+  assert.equal(result.status, "backend_unavailable");
+  assert.match(result.statusMessage, /Model service unavailable/);
+  assert.deepEqual(
+    harness.content.textNodes.map((node) => node.nodeValue),
+    ["Hello", "How are you?"]
+  );
+});
+
+test("reports malformed API JSON and does not change page text", async () => {
+  const harness = createFlowHarness({
+    segments: [{ text: "Hello" }],
+    invalidBatchJson: true
+  });
+
+  const result = await harness.sendAction("TRANSLATE_PAGE");
+  assert.equal(result.status, "backend_unavailable");
+  assert.match(result.statusMessage, /invalid JSON/);
+  assert.equal(harness.content.textNodes[0].nodeValue, "Hello");
+});
+
+test("handles pages with no translatable text without API translation requests", async () => {
+  const harness = createFlowHarness({
+    segments: [{ text: "" }, { text: " \t\n " }]
+  });
+
+  const result = await harness.sendAction("TRANSLATE_PAGE");
+  assert.equal(result.status, "success");
+  assert.match(result.statusMessage, /No translatable text/);
+  assert.equal(harness.apiRequests.length, 0);
+});
+
+test("splits large text without truncating content or exceeding batch limits", async () => {
+  const originalText = "Hello world. ".repeat(400);
+  const harness = createFlowHarness({
+    segments: [{ text: originalText }]
+  });
+
+  const result = await harness.sendAction("TRANSLATE_PAGE");
+  assert.equal(result.status, "success");
+  assert.equal(harness.content.textNodes[0].nodeValue, originalText.toUpperCase());
+
+  for (const request of harness.apiRequests) {
+    if (request.url.endsWith("/token-count")) {
+      assert.ok(request.body.texts.reduce((sum, text) => sum + text.length, 0) <= 2000);
+    }
+    if (request.url.endsWith("/translate-batch")) {
+      assert.ok(request.body.texts.length <= 8);
+      assert.ok(request.body.texts.reduce((sum, text) => sum + text.length, 0) <= 2000);
+    }
+  }
+});
+
+test("a rejected overlapping action does not release the active tab lock", async () => {
+  const harness = createFlowHarness({
+    segments: [{ text: "Hello" }],
+    holdHealth: true
+  });
+
+  const activeRequest = harness.sendAction("TRANSLATE_PAGE");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const rejectedAction = await harness.sendAction("RESTORE_PAGE");
+  const secondRejectedAction = await harness.sendAction("RESTORE_PAGE");
+  assert.match(rejectedAction.statusMessage, /already running/);
+  assert.match(secondRejectedAction.statusMessage, /already running/);
+
+  harness.releaseHealth();
+  assert.equal((await activeRequest).status, "success");
 });
 
 test("popup disables duplicate actions and displays progress and completion", () => {

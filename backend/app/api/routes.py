@@ -5,9 +5,12 @@ from fastapi import APIRouter, HTTPException
 from app.api.schemas import (
     TokenCountRequest,
     TokenCountResponse,
+    TranslationBatchRequest,
+    TranslationBatchResponse,
     TranslationRequest,
     TranslationResponse,
 )
+from app.core.limits import MAX_TOKEN_COUNT_BATCH_ITEMS, MAX_TRANSLATION_BATCH_ITEMS
 from app.services.translation import (
     TranslationError,
     TranslationInputTooLongError,
@@ -43,7 +46,8 @@ def languages() -> dict[str, list[dict[str, str]]]:
     response_model=TokenCountResponse,
     summary="Count model tokens for text segments",
     description=(
-        "Returns exact IndicTrans2 token counts for up to 8 segments with a "
+        f"Returns exact IndicTrans2 token counts for up to "
+        f"{MAX_TOKEN_COUNT_BATCH_ITEMS} segments with a "
         "combined limit of 2,000 characters. Use this to prepare valid "
         "translation requests."
     ),
@@ -69,6 +73,54 @@ def token_count(request: TokenCountRequest) -> TokenCountResponse:
         ) from exc
 
     return TokenCountResponse(token_counts=counts)
+
+
+@router.post(
+    "/translate-batch",
+    response_model=TranslationBatchResponse,
+    summary="Translate a bounded batch of English text segments to Hindi",
+    description=(
+        f"Translates up to {MAX_TRANSLATION_BATCH_ITEMS} text segments in one "
+        "model call. The combined input is limited to 2,000 characters and "
+        "each segment to 256 model tokens."
+    ),
+    responses={
+        422: {
+            "description": (
+                "Invalid request, unsupported language pair, or an over-limit segment."
+            )
+        },
+        500: {"description": "Unexpected internal error."},
+        503: {"description": "Translation model is unavailable."},
+    },
+)
+def translate_batch(
+    request: TranslationBatchRequest,
+) -> TranslationBatchResponse:
+    if (request.source_language, request.target_language) != ("en", "hi"):
+        raise HTTPException(
+            status_code=422,
+            detail="Unsupported language pair. Supported pair: en to hi.",
+        )
+
+    try:
+        translated_texts = translation_service.translate_many(request.texts)
+    except TranslationInputTooLongError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TranslationError as exc:
+        logger.exception("Batch translation service failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Translation service is unavailable. Please try again later.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Unexpected error while translating a batch")
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while translating text.",
+        ) from exc
+
+    return TranslationBatchResponse(translated_texts=translated_texts)
 
 
 @router.post(

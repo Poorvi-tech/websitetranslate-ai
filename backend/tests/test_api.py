@@ -53,6 +53,16 @@ class ApiTests(unittest.TestCase):
             "chrome-extension://test-extension-id",
         )
 
+    def test_cors_is_closed_when_no_origins_are_configured(self) -> None:
+        with patch.dict("os.environ", {"CORS_ORIGINS": ""}):
+            client = TestClient(create_app())
+            response = client.get(
+                "/health",
+                headers={"Origin": "http://localhost:3000"},
+            )
+
+        self.assertNotIn("access-control-allow-origin", response.headers)
+
     @patch(
         "app.api.routes.translation_service.translate",
         return_value="नमस्ते, आप कैसे हैं?",
@@ -94,10 +104,86 @@ class ApiTests(unittest.TestCase):
                 "token_counts": [5, 12],
                 "max_input_tokens": 256,
                 "max_text_characters": 2000,
-                "max_token_count_batch_items": 8,
+                "max_token_count_batch_items": 64,
             },
         )
         count_tokens.assert_called_once_with(texts)
+
+    @patch(
+        "app.api.routes.translation_service.count_tokens",
+        return_value=[5] * 64,
+    )
+    def test_token_count_accepts_up_to_64_items(self, count_tokens: Mock) -> None:
+        texts = [f"Text {index}" for index in range(64)]
+
+        response = self.client.post("/token-count", json={"texts": texts})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()["token_counts"]), 64)
+        count_tokens.assert_called_once_with(texts)
+
+    @patch(
+        "app.api.routes.translation_service.translate_many",
+        return_value=["नमस्ते", "आप कैसे हैं?"],
+    )
+    def test_translate_batch_returns_model_outputs(self, translate_many: Mock) -> None:
+        texts = ["Hello", "How are you?"]
+        response = self.client.post(
+            "/translate-batch",
+            json={
+                "texts": texts,
+                "source_language": "en",
+                "target_language": "hi",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"translated_texts": ["नमस्ते", "आप कैसे हैं?"]},
+        )
+        translate_many.assert_called_once_with(texts)
+
+    @patch("app.api.routes.translation_service.translate_many")
+    def test_translate_batch_rejects_empty_or_oversized_input(
+        self, translate_many: Mock
+    ) -> None:
+        invalid_requests = (
+            {"texts": [], "source_language": "en", "target_language": "hi"},
+            {
+                "texts": ["Hello", " \t "],
+                "source_language": "en",
+                "target_language": "hi",
+            },
+            {
+                "texts": ["a" * 1001, "b" * 1000],
+                "source_language": "en",
+                "target_language": "hi",
+            },
+        )
+        for payload in invalid_requests:
+            with self.subTest(payload=payload):
+                response = self.client.post("/translate-batch", json=payload)
+                self.assertEqual(response.status_code, 422)
+
+        translate_many.assert_not_called()
+
+    @patch("app.api.routes.translation_service.translate_many")
+    def test_translate_batch_rejects_unsupported_language_pair(
+        self, translate_many: Mock
+    ) -> None:
+        response = self.client.post(
+            "/translate-batch",
+            json={
+                "texts": ["Hello"],
+                "source_language": "hi",
+                "target_language": "en",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("Unsupported language pair", response.text)
+        translate_many.assert_not_called()
 
     def test_translate_requires_all_fields(self) -> None:
         response = self.client.post("/translate", json={"text": "Hello"})

@@ -1,4 +1,8 @@
 export const API_BASE_URL = "http://127.0.0.1:8000";
 
 export const MAX_API_TEXT_CHARACTERS = 2000;
-export const MAX_TOKEN_COUNT_BATCH_ITEMS = 8;
+export const MAX_INPUT_TOKENS = 256;
+export const MAX_TOKEN_COUNT_BATCH_ITEMS = 64;
+export const MAX_TRANSLATION_BATCH_ITEMS = 8;
+export const HEALTH_REQUEST_TIMEOUT_MS = 10000;
+export const API_REQUEST_TIMEOUT_MS = 120000;

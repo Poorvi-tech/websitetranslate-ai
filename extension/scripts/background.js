@@ -1,13 +1,19 @@
 import {
   API_BASE_URL,
+  API_REQUEST_TIMEOUT_MS,
+  HEALTH_REQUEST_TIMEOUT_MS,
   MAX_API_TEXT_CHARACTERS,
-  MAX_TOKEN_COUNT_BATCH_ITEMS
+  MAX_INPUT_TOKENS,
+  MAX_TOKEN_COUNT_BATCH_ITEMS,
+  MAX_TRANSLATION_BATCH_ITEMS
 } from "../config/api-config.js";
 
 const SUPPORTED_ACTIONS = new Set(["TRANSLATE_PAGE", "RESTORE_PAGE"]);
 const activeTabActions = new Set();
 
 class BackendUnavailableError extends Error {}
+
+class BackendTimeoutError extends BackendUnavailableError {}
 
 class BackendResponseError extends Error {
   constructor(status, detail) {
@@ -60,25 +66,41 @@ async function injectContentScript(tabId) {
 }
 
 async function requestApi(path, body) {
+  const controller = new AbortController();
+  const timeoutMs = path === "/health"
+    ? HEALTH_REQUEST_TIMEOUT_MS
+    : API_REQUEST_TIMEOUT_MS;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       method: body ? "POST" : "GET",
       headers: body ? { "Content-Type": "application/json" } : undefined,
       body: body ? JSON.stringify(body) : undefined,
-      cache: "no-store"
+      cache: "no-store",
+      signal: controller.signal
     });
   } catch (error) {
+    if (controller.signal.aborted) {
+      throw new BackendTimeoutError(
+        `${path} timed out after ${timeoutMs / 1000} seconds.`
+      );
+    }
     throw new BackendUnavailableError(
       error instanceof Error ? error.message : "The backend could not be reached."
     );
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   let responseBody;
   try {
     responseBody = await response.json();
-  } catch {
-    responseBody = {};
+  } catch (error) {
+    throw new BackendResponseError(
+      502,
+      `The backend returned invalid JSON for ${path}.`
+    );
   }
 
   if (!response.ok) {
@@ -202,7 +224,7 @@ async function prepareTranslationChunks(segments, requestId) {
   const initialJobs = [];
   const failedSegmentIds = new Set();
 
-  segments.forEach((segment, segmentIndex) => {
+  segments.forEach((segment) => {
     const text = typeof segment.text === "string" ? segment.text : "";
     const leadingWhitespace = text.match(/^\s*/u)?.[0] || "";
     const trailingWhitespace = text.match(/\s*$/u)?.[0] || "";
@@ -238,10 +260,10 @@ async function prepareTranslationChunks(segments, requestId) {
     );
     const nextPending = [];
 
-    for (const group of groups) {
+    for (const [groupIndex, group] of groups.entries()) {
       notifyProgress(
         requestId,
-        `Checking token limits for ${group.length} text chunks...`
+        `Checking token limits: batch ${groupIndex + 1} of ${groups.length}...`
       );
       const countResponse = await requestApi("/token-count", {
         texts: group.map((job) => job.text)
@@ -249,7 +271,7 @@ async function prepareTranslationChunks(segments, requestId) {
       if (
         !Array.isArray(countResponse.token_counts) ||
         countResponse.token_counts.length !== group.length ||
-        !Number.isInteger(countResponse.max_input_tokens) ||
+        countResponse.max_input_tokens !== MAX_INPUT_TOKENS ||
         !Number.isInteger(countResponse.max_text_characters) ||
         !Number.isInteger(countResponse.max_token_count_batch_items) ||
         countResponse.max_text_characters !== MAX_API_TEXT_CHARACTERS ||
@@ -260,7 +282,7 @@ async function prepareTranslationChunks(segments, requestId) {
 
       group.forEach((job, index) => {
         const tokenCount = countResponse.token_counts[index];
-        if (!Number.isInteger(tokenCount) || tokenCount < 0) {
+        if (!Number.isInteger(tokenCount) || tokenCount < 1) {
           throw new BackendResponseError(502, "Backend returned an invalid token count.");
         }
         if (tokenCount <= countResponse.max_input_tokens) {
@@ -298,46 +320,72 @@ async function translateChunks(jobs, requestId) {
   const failedSegmentIds = new Set();
   const groups = groupJobs(
     jobs,
-    MAX_TOKEN_COUNT_BATCH_ITEMS,
+    MAX_TRANSLATION_BATCH_ITEMS,
     MAX_API_TEXT_CHARACTERS
   );
   let completed = 0;
   let backendUnavailable = false;
+  const failureMessages = new Set();
 
   for (const [groupIndex, group] of groups.entries()) {
     notifyProgress(
       requestId,
       `Translating batch ${groupIndex + 1} of ${groups.length}...`
     );
-    const outcomes = await Promise.all(group.map(async (job) => {
-      try {
-        const response = await requestApi("/translate", {
-          text: job.text,
-          source_language: "en",
-          target_language: "hi"
-        });
-        return { job, translatedText: response.translated_text };
-      } catch (error) {
-        return { job, error };
+    let outcomes;
+    try {
+      const response = await requestApi("/translate-batch", {
+        texts: group.map((job) => job.text),
+        source_language: "en",
+        target_language: "hi"
+      });
+      if (
+        !Array.isArray(response.translated_texts) ||
+        response.translated_texts.length !== group.length
+      ) {
+        throw new BackendResponseError(
+          502,
+          "The backend returned an invalid translation batch."
+        );
       }
-    }));
+
+      outcomes = group.map((job, index) => {
+        const translatedText = response.translated_texts[index];
+        if (typeof translatedText !== "string" || !translatedText.trim()) {
+          return {
+            job,
+            error: new BackendResponseError(
+              502,
+              `The backend returned an empty translation for batch item ${index + 1}.`
+            )
+          };
+        }
+        return { job, translatedText };
+      });
+    } catch (error) {
+      console.warn("Translation batch request failed.", {
+        status: error instanceof BackendResponseError ? error.status : undefined,
+        message: error instanceof Error ? error.message : "Unknown request error."
+      });
+      outcomes = group.map((job) => ({ job, error }));
+    }
 
     for (const outcome of outcomes) {
       completed++;
       if (outcome.error) {
         failedSegmentIds.add(outcome.job.segmentId);
+        failureMessages.add(
+          outcome.error instanceof Error
+            ? outcome.error.message
+            : "The translation batch failed."
+        );
         if (
           outcome.error instanceof BackendUnavailableError ||
           (outcome.error instanceof BackendResponseError &&
-            outcome.error.status === 503)
+            outcome.error.status >= 500)
         ) {
           backendUnavailable = true;
         }
-        continue;
-      }
-
-      if (typeof outcome.translatedText !== "string") {
-        failedSegmentIds.add(outcome.job.segmentId);
         continue;
       }
 
@@ -357,7 +405,12 @@ async function translateChunks(jobs, requestId) {
     }
   }
 
-  return { translatedBySegment, failedSegmentIds, backendUnavailable };
+  return {
+    translatedBySegment,
+    failedSegmentIds,
+    backendUnavailable,
+    failureMessages: [...failureMessages]
+  };
 }
 
 function assembleTranslations(segments, translatedBySegment, failedSegmentIds) {
@@ -405,11 +458,16 @@ async function translatePage(tabId, message) {
   let health;
   try {
     health = await requestApi("/health");
-  } catch {
+  } catch (error) {
+    const reason = error instanceof BackendTimeoutError
+      ? "The backend health check timed out."
+      : error instanceof BackendResponseError
+        ? error.message
+        : `Backend unavailable at ${API_BASE_URL}.`;
     return {
       ok: false,
       status: "backend_unavailable",
-      statusMessage: `Backend unavailable at ${API_BASE_URL}. Start the local backend and try again.`
+      statusMessage: `${reason} Start the local backend and try again.`
     };
   }
   if (health.status !== "ok") {
@@ -438,6 +496,10 @@ async function translatePage(tabId, message) {
     };
   }
 
+  notifyProgress(
+    message.requestId,
+    `Found ${extracted.segments.length} text segments. Preparing bounded batches...`
+  );
   try {
     const { readyJobs, failedSegmentIds } = await prepareTranslationChunks(
       extracted.segments,
@@ -464,18 +526,26 @@ async function translatePage(tabId, message) {
         type: "APPLY_TRANSLATIONS",
         translations: results
       });
-      if (!applied?.ok) {
-        throw new Error("The webpage did not accept translated text.");
+      if (
+        !applied?.ok ||
+        !Number.isInteger(applied.appliedCount) ||
+        applied.appliedCount < 0 ||
+        !Number.isInteger(applied.skippedCount) ||
+        applied.skippedCount < 0
+      ) {
+        throw new Error("The webpage returned an invalid translation result.");
       }
-      appliedCount = applied.appliedCount || 0;
-      skippedCount = applied.skippedCount || 0;
+      appliedCount = applied.appliedCount;
+      skippedCount = applied.skippedCount;
     }
 
     const failedCount = failedSegmentIds.size + skippedCount;
     if (failedCount) {
+      const reason = translated.failureMessages[0];
+      const detail = reason ? ` First error: ${reason}` : "";
       const statusMessage = translated.backendUnavailable
-        ? `Backend unavailable during translation. ${appliedCount} segments translated; ${failedCount} left unchanged.`
-        : `Translation partially completed. ${appliedCount} segments translated; ${failedCount} left unchanged.`;
+        ? `Backend unavailable or timed out during translation. ${appliedCount} segments translated; ${failedCount} left unchanged.${detail}`
+        : `Translation partially completed. ${appliedCount} segments translated; ${failedCount} left unchanged.${detail}`;
       return {
         ok: false,
         status: translated.backendUnavailable ? "backend_unavailable" : "partial",
@@ -496,7 +566,7 @@ async function translatePage(tabId, message) {
       return {
         ok: false,
         status: "backend_unavailable",
-        statusMessage: `Backend unavailable at ${API_BASE_URL}. Translated text was not discarded.`
+        statusMessage: `Backend request failed: ${error.message} Translated text was not discarded.`
       };
     }
     throw error;
@@ -526,9 +596,10 @@ async function restorePage(tabId) {
 
 async function handlePageTextAction(message) {
   let tab;
+  let ownsActionLock = false;
   try {
     tab = await getActiveTab();
-    if (!tab?.id) {
+    if (typeof tab?.id !== "number" || tab.id < 0) {
       return {
         ok: false,
         status: "error",
@@ -544,6 +615,7 @@ async function handlePageTextAction(message) {
       };
     }
     activeTabActions.add(tab.id);
+    ownsActionLock = true;
 
     if (message.type === "TRANSLATE_PAGE") {
       return await translatePage(tab.id, message);
@@ -557,7 +629,7 @@ async function handlePageTextAction(message) {
       statusMessage: `Translation failed: ${error instanceof Error ? error.message : "Unexpected webpage error."}`
     };
   } finally {
-    if (tab?.id) {
+    if (ownsActionLock) {
       activeTabActions.delete(tab.id);
     }
   }

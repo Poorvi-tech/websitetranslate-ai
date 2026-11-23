@@ -4,7 +4,18 @@ from app.core.limits import (
     MAX_INPUT_TOKENS,
     MAX_TEXT_CHARACTERS,
     MAX_TOKEN_COUNT_BATCH_ITEMS,
+    MAX_TRANSLATION_BATCH_ITEMS,
 )
+
+
+def _validate_text_segments(values: list[str]) -> list[str]:
+    if any(not value.strip() for value in values):
+        raise ValueError("Texts must not be empty or whitespace-only.")
+    if sum(len(value) for value in values) > MAX_TEXT_CHARACTERS:
+        raise ValueError(
+            f"Combined text must not exceed {MAX_TEXT_CHARACTERS} characters."
+        )
+    return values
 
 
 class TranslationRequest(BaseModel):
@@ -30,6 +41,25 @@ class TranslationResponse(BaseModel):
     target_language: str
 
 
+class TranslationBatchRequest(BaseModel):
+    texts: list[str] = Field(
+        min_length=1,
+        max_length=MAX_TRANSLATION_BATCH_ITEMS,
+        description="Text segments; combined text is limited to 2,000 characters.",
+    )
+    source_language: str = Field(description="Source language code; currently en.")
+    target_language: str = Field(description="Target language code; currently hi.")
+
+    @field_validator("texts")
+    @classmethod
+    def require_non_whitespace_texts(cls, values: list[str]) -> list[str]:
+        return _validate_text_segments(values)
+
+
+class TranslationBatchResponse(BaseModel):
+    translated_texts: list[str]
+
+
 class TokenCountRequest(BaseModel):
     texts: list[str] = Field(
         min_length=1,
@@ -40,13 +70,7 @@ class TokenCountRequest(BaseModel):
     @field_validator("texts")
     @classmethod
     def require_non_whitespace_texts(cls, values: list[str]) -> list[str]:
-        if any(not value.strip() for value in values):
-            raise ValueError("Texts must not be empty or whitespace-only.")
-        if sum(len(value) for value in values) > MAX_TEXT_CHARACTERS:
-            raise ValueError(
-                f"Combined text must not exceed {MAX_TEXT_CHARACTERS} characters."
-            )
-        return values
+        return _validate_text_segments(values)
 
 
 class TokenCountResponse(BaseModel):

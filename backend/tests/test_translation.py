@@ -21,6 +21,20 @@ class TranslationServiceTests(unittest.TestCase):
 
         self.assertFalse(self.service.is_loaded)
 
+    def test_rejects_invalid_batch_without_loading_model(self) -> None:
+        invalid_batches = (
+            [],
+            ["Hello", ""],
+            ["a" * 1001, "b" * 1000],
+            ["Hello"] * 9,
+        )
+        for texts in invalid_batches:
+            with self.subTest(texts=texts[:2]):
+                with self.assertRaises(ValueError):
+                    self.service.translate_many(texts)
+
+        self.assertFalse(self.service.is_loaded)
+
     @patch(
         "app.services.translation.AutoTokenizer.from_pretrained",
         side_effect=OSError("model files unavailable"),
@@ -123,6 +137,43 @@ class TranslationServiceTests(unittest.TestCase):
         processor_factory.assert_called_once_with(inference=True)
         self.assertTrue(self.service.is_loaded)
         self.assertIsNotNone(self.service.load_time_seconds)
+
+    @patch("app.services.translation.IndicProcessor")
+    @patch("app.services.translation.AutoModelForSeq2SeqLM.from_pretrained")
+    @patch("app.services.translation.AutoTokenizer.from_pretrained")
+    def test_translates_a_batch_in_one_model_generation(
+        self,
+        tokenizer_loader: Mock,
+        model_loader: Mock,
+        processor_factory: Mock,
+    ) -> None:
+        inputs = MagicMock()
+        inputs.__getitem__.return_value = SimpleNamespace(shape=(2, 4))
+        inputs.to.return_value = {"input_ids": "tokens"}
+        tokenizer = Mock()
+        tokenizer.return_value = inputs
+        tokenizer.batch_decode.return_value = ["Namaste", "Kaise hain"]
+        tokenizer_loader.return_value = tokenizer
+
+        model = Mock()
+        model.generate.return_value = ["generated batch"]
+        model_loader.return_value = model
+
+        processor = Mock()
+        processor.postprocess_batch.return_value = ["नमस्ते", "कैसे हैं"]
+        processor_factory.return_value = processor
+
+        self.assertEqual(
+            self.service.translate_many(["Hello", "How are you?"]),
+            ["नमस्ते", "कैसे हैं"],
+        )
+
+        model.generate.assert_called_once()
+        tokenizer.batch_decode.assert_called_once()
+        processor.postprocess_batch.assert_called_once_with(
+            ["Namaste", "Kaise hain"],
+            lang="hin_Deva",
+        )
 
 
 if __name__ == "__main__":
